@@ -1216,35 +1216,37 @@ async def test_backchannel_boundary_releases_end_boundary_transcript() -> None:
         vad=None,
         using_default_vad=False,
         interruption_detection=None,
-        turn_detection="vad",
+        turn_detection="manual",
     )
     recognition._interruption_enabled = True
     recognition._interruption_ch = aio.Chan[inference.InterruptionDataFrameType]()
-    input_started_at = time.time() - 10.0
-    # the input anchor lives on the STT pipeline (see _STTPipeline.input_started_at)
-    recognition._stt_pipeline = SimpleNamespace(input_started_at=input_started_at)  # type: ignore[assignment]
 
     try:
-        # the agent speaks for a couple of seconds so the held transcript still lands
-        # after the agent-speech start (the lower bound of the ignore window)
-        recognition._on_start_of_agent_speech(started_at=time.time() - 2.0)
-        speech_ended_at = time.time()
-        recognition._on_end_of_agent_speech(ignore_user_transcript_until=speech_ended_at)
-
-        assert not recognition._should_hold_stt_event(
+        recognition._on_start_of_agent_speech(started_at=8.0)
+        await recognition._on_stt_event(
+            _final_transcript_event(
+                text="before the boundary", start_time=0.0, end_time=0.0, created_at=9.0
+            )
+        )
+        await recognition._on_stt_event(
             _final_transcript_event(
                 text="near the boundary",
-                start_time=speech_ended_at - input_started_at - 0.25,
-                end_time=speech_ended_at - input_started_at,
+                start_time=10_000.0,
+                end_time=20_000.0,
+                created_at=9.75,
             )
         )
-        assert recognition._should_hold_stt_event(
+        recognition._on_end_of_agent_speech(ended_at=10.0)
+        await recognition._on_stt_event(
             _final_transcript_event(
-                text="before the boundary",
-                start_time=speech_ended_at - input_started_at - 0.75,
-                end_time=speech_ended_at - input_started_at - 0.5,
+                text="after agent", start_time=0.0, end_time=0.0, created_at=10.1
             )
         )
+
+        assert recognition._hooks.final_transcripts == [  # type: ignore[attr-defined]
+            "near the boundary",
+            "after agent",
+        ]
     finally:
         recognition._interruption_ch.close()
         await _close_test_session(session)
@@ -1409,6 +1411,7 @@ async def test_stt_pipeline_recreates_stream_after_unrecoverable_error(
         ev = await asyncio.wait_for(pipeline.event_ch.recv(), timeout=5)
         assert ev.type == SpeechEventType.FINAL_TRANSCRIPT
         assert ev.alternatives[0].text == "recovered"
+        assert ev.created_at > 0
         assert attempts == 2
     finally:
         await pipeline.aclose()
@@ -1609,7 +1612,7 @@ async def test_force_flush_held_transcripts_emits_buffered_events() -> None:
     )
 
     try:
-        await recognition._flush_held_transcripts(cooldown=0.0, force=True)
+        recognition._flush_held_transcripts(force=True)
 
         assert hooks.final_transcripts == ["held transcript"]
         assert not recognition._transcript_buffer
@@ -1617,7 +1620,7 @@ async def test_force_flush_held_transcripts_emits_buffered_events() -> None:
         await _close_test_session(session)
 
 
-async def test_held_final_transcript_cancels_transcription_timeout() -> None:
+async def test_held_final_transcript_cancels_timeout_only_after_flush() -> None:
     session = create_session(FakeActions())
     hooks = _TestRecognitionHooks()
     recognition = AudioRecognition(
@@ -1628,9 +1631,10 @@ async def test_held_final_transcript_cancels_transcription_timeout() -> None:
         vad=None,
         using_default_vad=False,
         interruption_detection=None,
-        turn_detection="vad",
+        turn_detection="manual",
     )
     recognition._interruption_enabled = True
+    recognition._interruption_ch = aio.Chan[inference.InterruptionDataFrameType]()
     recognition._agent_speaking = True
     timeout_handle = asyncio.get_running_loop().call_later(60.0, lambda: None)
     recognition._transcription_timeout_handle = timeout_handle
@@ -1639,12 +1643,20 @@ async def test_held_final_transcript_cancels_transcription_timeout() -> None:
     try:
         await recognition._on_stt_event(event)
 
-        assert timeout_handle.cancelled()
-        assert recognition._turn_transcript_received
+        assert not timeout_handle.cancelled()
+        assert not recognition._turn_transcript_received
         assert list(recognition._transcript_buffer) == [event]
         assert hooks.final_transcripts == []
+
+        recognition._flush_held_transcripts(force=True)
+
+        assert timeout_handle.cancelled()
+        assert recognition._turn_transcript_received
+        assert hooks.final_transcripts == ["held transcript"]
+        assert recognition._current_transcript == "held transcript"
     finally:
         timeout_handle.cancel()
+        recognition._interruption_ch.close()
         await _close_test_session(session)
 
 
@@ -2140,8 +2152,10 @@ def _backchannel_event() -> inference.OverlappingSpeechEvent:
     )
 
 
-def _final_transcript_event(*, text: str, start_time: float, end_time: float) -> SpeechEvent:
-    return SpeechEvent(
+def _final_transcript_event(
+    *, text: str, start_time: float, end_time: float, created_at: float | None = None
+) -> SpeechEvent:
+    ev = SpeechEvent(
         type=SpeechEventType.FINAL_TRANSCRIPT,
         alternatives=[
             SpeechData(
@@ -2152,6 +2166,9 @@ def _final_transcript_event(*, text: str, start_time: float, end_time: float) ->
             )
         ],
     )
+    if created_at is not None:
+        ev.created_at = created_at
+    return ev
 
 
 async def _close_test_session(session: object) -> None:
