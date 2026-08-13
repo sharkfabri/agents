@@ -2025,6 +2025,8 @@ class AgentActivity(RecognitionHooks):
 
         if self._rt_turn_detection_enabled:
             # ignore if realtime model has turn detection enabled
+            if self._audio_recognition is not None:
+                self._audio_recognition._clear_pending_interruption()
             return
 
         interruption_options = self._session.options.interruption
@@ -2088,6 +2090,11 @@ class AgentActivity(RecognitionHooks):
                     self._rt_session.interrupt()
 
                 self._current_speech.interrupt()
+        elif self._current_speech is None or (
+            not self._current_speech.interrupted and not self._current_speech.allow_interruptions
+        ):
+            if self._audio_recognition is not None:
+                self._audio_recognition._clear_pending_interruption()
 
     # region recognition hooks
 
@@ -2105,7 +2112,10 @@ class AgentActivity(RecognitionHooks):
             )
         self._user_silence_event.clear()
         self._stt_eos_received = False
-        self._interruption_detected = False
+        if not (
+            self._audio_recognition is not None and self._audio_recognition._interruption_pending
+        ):
+            self._interruption_detected = False
 
         # cancel the timer when user starts speaking but leave the paused state unchanged
         self._cancel_false_interruption_timer()
@@ -3466,9 +3476,7 @@ class AgentActivity(RecognitionHooks):
         if not speech_handle.interrupted and len(tool_output.output) > 0:
             self._session._update_agent_state("thinking")
             if self._audio_recognition:
-                self._audio_recognition._on_end_of_agent_speech(
-                    ended_at=time.time(), paused=True
-                )
+                self._audio_recognition._on_end_of_agent_speech(ended_at=time.time(), paused=True)
             if self.interruption_enabled:
                 self._restore_interruption_by_audio_activity()
         elif self._session.agent_state == "speaking":

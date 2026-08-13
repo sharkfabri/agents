@@ -337,13 +337,13 @@ async def test_tool_call() -> None:
     def _record_agent_speech_end(
         recognition: AudioRecognition,
         *,
-        ignore_user_transcript_until: float,
+        ended_at: float,
         paused: bool = False,
     ) -> None:
         agent_speech_end_states.append((session.agent_state, paused))
         on_end_of_agent_speech(
             recognition,
-            ignore_user_transcript_until=ignore_user_transcript_until,
+            ended_at=ended_at,
             paused=paused,
         )
 
